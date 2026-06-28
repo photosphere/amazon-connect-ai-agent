@@ -52,6 +52,12 @@ VOICE_PROMPT_NAME="SelfServiceOrchestrationVoice_Prompt"
 CHAT_PROMPT_NAME="SelfServiceOrchestrationChat_Prompt"
 VOICE_AGENT_NAME="SelfServiceOrchestrator_Voice_Agent"
 CHAT_AGENT_NAME="SelfServiceOrchestrator_Chat_Agent"
+
+# Optional suffix appended to all flow / Lambda / AI agent / AI prompt names so
+# repeated deployments do not collide. Prompted for at runtime (empty = none)
+# unless supplied via the NAME_SUFFIX environment variable. The suffix is
+# appended verbatim, so include any separator you want (e.g. "_v2", "-test").
+NAME_SUFFIX="${NAME_SUFFIX:-}"
 SECURITY_PROFILE_NAME="AI-Agent"
 
 # Q in Connect "domain" (assistant) settings used only when the target instance
@@ -70,7 +76,10 @@ KEEP_TOOLS='["Complete","Escalate"]'
 # Contact flow import configuration. Override via environment variables.
 # ----------------------------------------------------------------------------
 FLOW_JSON_FILE="${FLOW_JSON_FILE:-AI Agent - MCP Inbound Flow.json}"
-FLOW_NAME="${FLOW_NAME:-AI Agent - MCP Inbound Flow}"
+# Imported contact flow name. Prompted for at runtime (default below) unless
+# supplied via the FLOW_NAME environment variable.
+FLOW_NAME_DEFAULT="AI Agent - MCP Inbound Flow"
+FLOW_NAME="${FLOW_NAME:-}"
 FLOW_TYPE="${FLOW_TYPE:-CONTACT_FLOW}"
 
 # Values rewritten inside the flow's Lambda invocation attributes.
@@ -78,13 +87,30 @@ FLOW_NEW_PHONE="${FLOW_NEW_PHONE:-12345678900}"
 FLOW_NEW_BU="${FLOW_NEW_BU:-US}"
 
 LAMBDA_FUNCTION_NAME="${LAMBDA_FUNCTION_NAME:-ConnectAssistantUpdateSessionData}"
-LAMBDA_ZIP_FILE="${LAMBDA_ZIP_FILE:-ConnectAssistantUpdateSessionData-dbcd9ed4-0218-4522-adff-b9850c8b80eb.zip}"
+LAMBDA_SRC_DIR="${LAMBDA_SRC_DIR:-lambda/ConnectAssistantUpdateSessionData}"
 LAMBDA_RUNTIME="${LAMBDA_RUNTIME:-nodejs20.x}"
 LAMBDA_HANDLER="${LAMBDA_HANDLER:-index.handler}"
 LAMBDA_TIMEOUT="${LAMBDA_TIMEOUT:-15}"
 # Optional: pre-existing execution role ARN. If empty a role is created.
 LAMBDA_ROLE_ARN="${LAMBDA_ROLE_ARN:-}"
-LAMBDA_ROLE_NAME="${LAMBDA_ROLE_NAME:-${LAMBDA_FUNCTION_NAME}-role}"
+# Role name defaults to "<function-name>-role"; derived after the suffix is
+# known (see "apply name suffix" below) unless explicitly set here.
+LAMBDA_ROLE_NAME="${LAMBDA_ROLE_NAME:-}"
+
+# Chat-timeouts Lambda (sets customer idle / auto-disconnect timeouts for chat
+# via the Connect UpdateParticipantRoleConfig API). Its source lives in
+# lambda/ConnectSetChatTimeouts/ and is zipped on the fly at deploy time.
+# https://docs.aws.amazon.com/connect/latest/adminguide/setup-chat-timeouts.html
+TIMEOUTS_LAMBDA_FUNCTION_NAME="${TIMEOUTS_LAMBDA_FUNCTION_NAME:-ConnectSetChatTimeouts}"
+TIMEOUTS_LAMBDA_SRC_DIR="${TIMEOUTS_LAMBDA_SRC_DIR:-lambda/ConnectSetChatTimeouts}"
+TIMEOUTS_LAMBDA_RUNTIME="${TIMEOUTS_LAMBDA_RUNTIME:-python3.12}"
+TIMEOUTS_LAMBDA_HANDLER="${TIMEOUTS_LAMBDA_HANDLER:-index.lambda_handler}"
+TIMEOUTS_LAMBDA_TIMEOUT="${TIMEOUTS_LAMBDA_TIMEOUT:-15}"
+# Role name defaults to "<function-name>-role"; derived after the suffix is known.
+TIMEOUTS_LAMBDA_ROLE_NAME="${TIMEOUTS_LAMBDA_ROLE_NAME:-}"
+# Customer chat timeouts in minutes (Connect allows 2-480). Defaults: idle 5, auto-disconnect 10.
+CUSTOMER_IDLE_TIMEOUT_MINUTES="${CUSTOMER_IDLE_TIMEOUT_MINUTES:-5}"
+CUSTOMER_AUTO_DISCONNECT_TIMEOUT_MINUTES="${CUSTOMER_AUTO_DISCONNECT_TIMEOUT_MINUTES:-10}"
 
 # Lex V2 "TestBotAlias" always has this fixed alias id.
 LEX_TEST_ALIAS_ID="TSTALIASID"
@@ -97,12 +123,17 @@ FLOW_OLD_ASSISTANT_ARN="arn:aws:wisdom:us-west-2:991727053196:assistant/14fe4db3
 FLOW_OLD_CHAT_AGENT_ARN="arn:aws:wisdom:us-west-2:991727053196:ai-agent/14fe4db3-cca0-4c91-b484-ee7dc6a0e9aa/f01b8be1-b98b-40b9-b942-3ffc62c14e57:\$LATEST"
 FLOW_OLD_VOICE_AGENT_ARN="arn:aws:wisdom:us-west-2:991727053196:ai-agent/14fe4db3-cca0-4c91-b484-ee7dc6a0e9aa/1ad99f3e-e69c-4477-b45e-36b8b56a0449:\$LATEST"
 FLOW_OLD_LAMBDA_ARN="arn:aws:lambda:us-west-2:991727053196:function:ConnectAssistantUpdateSessionData"
+FLOW_OLD_TIMEOUTS_LAMBDA_ARN="arn:aws:lambda:us-west-2:991727053196:function:ConnectSetChatTimeouts"
 FLOW_OLD_LEX_ALIAS_ARN="arn:aws:lex:us-west-2:991727053196:bot-alias/W0MUSVSUH1/TSTALIASID"
 FLOW_OLD_QUEUE_ARN="arn:aws:connect:us-west-2:991727053196:instance/2ff5674e-de94-4714-bc6d-d7f2cebeee9d/queue/40bfd421-818e-4c35-809d-f5bcd94f1493"
 FLOW_OLD_CHAT_AGENT_NAME="SelfServiceOrchestrator_Chat_0519 "
 FLOW_OLD_VOICE_AGENT_NAME="SelfServiceOrchestrator_0519  "
 FLOW_OLD_LEX_BOT_NAME="NovaSonicSupport_2025_Bot"
 FLOW_OLD_NAME="AI Agent - MCP"
+# Lambda display names as they appear in the template flow's metadata (rewritten
+# to the suffixed function names so the console shows the deployed functions).
+FLOW_OLD_LAMBDA_NAME="ConnectAssistantUpdateSessionData"
+FLOW_OLD_TIMEOUTS_LAMBDA_NAME="ConnectSetChatTimeouts"
 FLOW_OLD_PHONE="18618383641"
 FLOW_OLD_BU="US"
 
@@ -116,6 +147,31 @@ die()  { printf '\033[1;31m[FAIL]\033[0m  %s\n' "$*" >&2; exit 1; }
 
 # region_from_arn <arn>  ->  prints the region segment (4th field)
 region_from_arn() { echo "$1" | awk -F: '{print $4}'; }
+
+# zip_dir <src_dir> <out_zip> : portably zip the contents of a directory
+# (excluding Python cache artifacts). Uses zip if available, else python3.
+zip_dir() {
+  local src="$1" out="$2"
+  rm -f "$out"
+  if command -v zip >/dev/null 2>&1; then
+    ( cd "$src" && zip -q -r - . -x '*.pyc' -x '*/__pycache__/*' ) > "$out" || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$src" "$out" <<'PY' || return 1
+import os, sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in files:
+            if f.endswith(".pyc"):
+                continue
+            full = os.path.join(root, f)
+            z.write(full, os.path.relpath(full, src))
+PY
+  else
+    return 1
+  fi
+}
 
 # build_lex_alias_arn <lex bot or alias ARN> -> prints the TestBotAlias ARN.
 # Accepts either a bot ARN (.../bot/<id>) or a bot-alias ARN, and always targets
@@ -166,6 +222,36 @@ if [ -z "$LEX_BOT_ARN" ]; then
 fi
 LEX_ALIAS_ARN="$(build_lex_alias_arn "$LEX_BOT_ARN")"
 
+# Prompt for the contact flow name (defaults to FLOW_NAME_DEFAULT on empty input).
+# Skipped if FLOW_NAME was supplied via the environment.
+if [ -z "$FLOW_NAME" ]; then
+  printf '请输入 contact flow 名称 [默认: %s]: ' "$FLOW_NAME_DEFAULT"
+  read -r FLOW_NAME
+  [ -n "$FLOW_NAME" ] || FLOW_NAME="$FLOW_NAME_DEFAULT"
+fi
+
+# Prompt for an optional name suffix (empty = no suffix). Only prompts when stdin
+# is a terminal; in non-interactive runs supply it via the NAME_SUFFIX env var.
+if [ -z "$NAME_SUFFIX" ] && [ -t 0 ]; then
+  printf '请输入名称后缀（用于避免重复部署冲突，直接回车则不加后缀）: '
+  read -r NAME_SUFFIX
+fi
+
+# Apply the suffix to every user-facing resource name (flow / Lambda functions /
+# AI agents / AI prompts), then derive the Lambda role names from the final
+# function names (unless explicitly overridden via the environment).
+if [ -n "$NAME_SUFFIX" ]; then
+  VOICE_PROMPT_NAME="${VOICE_PROMPT_NAME}${NAME_SUFFIX}"
+  CHAT_PROMPT_NAME="${CHAT_PROMPT_NAME}${NAME_SUFFIX}"
+  VOICE_AGENT_NAME="${VOICE_AGENT_NAME}${NAME_SUFFIX}"
+  CHAT_AGENT_NAME="${CHAT_AGENT_NAME}${NAME_SUFFIX}"
+  LAMBDA_FUNCTION_NAME="${LAMBDA_FUNCTION_NAME}${NAME_SUFFIX}"
+  TIMEOUTS_LAMBDA_FUNCTION_NAME="${TIMEOUTS_LAMBDA_FUNCTION_NAME}${NAME_SUFFIX}"
+  FLOW_NAME="${FLOW_NAME}${NAME_SUFFIX}"
+fi
+[ -n "$LAMBDA_ROLE_NAME" ]          || LAMBDA_ROLE_NAME="${LAMBDA_FUNCTION_NAME}-role"
+[ -n "$TIMEOUTS_LAMBDA_ROLE_NAME" ] || TIMEOUTS_LAMBDA_ROLE_NAME="${TIMEOUTS_LAMBDA_FUNCTION_NAME}-role"
+
 TARGET_INSTANCE_ID="${TARGET_INSTANCE_ARN##*/}"
 TARGET_REGION="$(region_from_arn "$TARGET_INSTANCE_ARN")"
 TARGET_ACCOUNT="$(echo "$TARGET_INSTANCE_ARN" | awk -F: '{print $5}')"
@@ -175,6 +261,8 @@ log "目标 Connect 实例     : $TARGET_INSTANCE_ARN"
 log "目标实例 ID           : $TARGET_INSTANCE_ID"
 log "目标区域              : $TARGET_REGION"
 log "Lex 别名(TestBotAlias): $LEX_ALIAS_ARN"
+log "Contact flow 名称     : $FLOW_NAME"
+log "名称后缀(suffix)      : ${NAME_SUFFIX:-（无）}"
 log "参考 assistant        : $REF_ASSISTANT_ARN ($REF_REGION)"
 
 # ----------------------------------------------------------------------------
@@ -608,7 +696,8 @@ associate_sp_with_agent "$CHAT_AGENT_NAME" "$CHAT_AGENT_ID"
 # 5. Deploy the ConnectAssistantUpdateSessionData Lambda + associate with instance
 # ============================================================================
 log "=== 部署 Lambda $LAMBDA_FUNCTION_NAME ==="
-[ -f "$LAMBDA_ZIP_FILE" ] || die "未找到 Lambda zip 文件：$LAMBDA_ZIP_FILE"
+[ -f "$LAMBDA_SRC_DIR/index.js" ] \
+  || die "未找到 Lambda 源码：$LAMBDA_SRC_DIR/index.js"
 
 # ensure_lambda_role : returns an execution role ARN, creating one if needed.
 ensure_lambda_role() {
@@ -628,18 +717,27 @@ ensure_lambda_role() {
   echo "$arn"
 }
 
+# Package the function source on the fly (no pre-built zip needed).
+LAMBDA_ZIP="$(mktemp -t update-session-data-XXXXXX).zip"
+trap 'rm -f "$LAMBDA_ZIP"' EXIT
+zip_dir "$LAMBDA_SRC_DIR" "$LAMBDA_ZIP" \
+  || die "打包 Lambda $LAMBDA_FUNCTION_NAME 失败（需要 zip 或 python3）。"
+
 LAMBDA_ENV="Variables={AI_ASSISTANT_ID=${ASSISTANT_ID},CONNECT_INSTANCE_ID=${TARGET_INSTANCE_ID}}"
 
 if aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" >/dev/null 2>&1; then
   log "Lambda 已存在，正在更新代码与配置。" >&2
   aws lambda update-function-code \
     --function-name "$LAMBDA_FUNCTION_NAME" \
-    --zip-file "fileb://$LAMBDA_ZIP_FILE" \
+    --zip-file "fileb://$LAMBDA_ZIP" \
     --region "$TARGET_REGION" --output json >/dev/null || die "update-function-code 失败。"
   aws lambda wait function-updated \
     --function-name "$LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" 2>/dev/null || true
   aws lambda update-function-configuration \
     --function-name "$LAMBDA_FUNCTION_NAME" \
+    --runtime "$LAMBDA_RUNTIME" \
+    --handler "$LAMBDA_HANDLER" \
+    --timeout "$LAMBDA_TIMEOUT" \
     --environment "$LAMBDA_ENV" \
     --region "$TARGET_REGION" --output json >/dev/null || die "update-function-configuration 失败。"
 else
@@ -651,7 +749,7 @@ else
     --role "$LAMBDA_ROLE_ARN" \
     --timeout "$LAMBDA_TIMEOUT" \
     --environment "$LAMBDA_ENV" \
-    --zip-file "fileb://$LAMBDA_ZIP_FILE" \
+    --zip-file "fileb://$LAMBDA_ZIP" \
     --region "$TARGET_REGION" --output json >/dev/null || die "create-function 失败。"
 fi
 aws lambda wait function-updated \
@@ -701,6 +799,93 @@ aws connect associate-lambda-function \
   --region "$TARGET_REGION" >/dev/null 2>&1 \
   && ok "已将 Lambda 关联到实例。" \
   || log "Lambda 已关联到实例（继续）。" >&2
+
+# ============================================================================
+# 5b. Deploy the ConnectSetChatTimeouts Lambda (chat idle / auto-disconnect)
+# ============================================================================
+# This Lambda calls connect:UpdateParticipantRoleConfig to set the CUSTOMER
+# chat idle timeout and auto-disconnect timeout. Its source is zipped on the fly.
+# https://docs.aws.amazon.com/connect/latest/adminguide/setup-chat-timeouts.html
+log "=== 部署 Lambda ${TIMEOUTS_LAMBDA_FUNCTION_NAME}（聊天超时设置）==="
+[ -f "$TIMEOUTS_LAMBDA_SRC_DIR/index.py" ] \
+  || die "未找到聊天超时 Lambda 源码：$TIMEOUTS_LAMBDA_SRC_DIR/index.py"
+
+TIMEOUTS_LAMBDA_ZIP="$(mktemp -t chat-timeouts-XXXXXX).zip"
+trap 'rm -f "$LAMBDA_ZIP" "$TIMEOUTS_LAMBDA_ZIP"' EXIT
+zip_dir "$TIMEOUTS_LAMBDA_SRC_DIR" "$TIMEOUTS_LAMBDA_ZIP" \
+  || die "打包聊天超时 Lambda 失败（需要 zip 或 python3）。"
+
+TIMEOUTS_LAMBDA_ENV="Variables={CONNECT_INSTANCE_ID=${TARGET_INSTANCE_ID}}"
+
+if aws lambda get-function --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" >/dev/null 2>&1; then
+  log "聊天超时 Lambda 已存在，正在更新代码与配置。" >&2
+  aws lambda update-function-code \
+    --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" \
+    --zip-file "fileb://$TIMEOUTS_LAMBDA_ZIP" \
+    --region "$TARGET_REGION" --output json >/dev/null || die "update-function-code 失败（聊天超时 Lambda）。"
+  aws lambda wait function-updated \
+    --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" 2>/dev/null || true
+  aws lambda update-function-configuration \
+    --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" \
+    --runtime "$TIMEOUTS_LAMBDA_RUNTIME" \
+    --handler "$TIMEOUTS_LAMBDA_HANDLER" \
+    --timeout "$TIMEOUTS_LAMBDA_TIMEOUT" \
+    --environment "$TIMEOUTS_LAMBDA_ENV" \
+    --region "$TARGET_REGION" --output json >/dev/null || die "update-function-configuration 失败（聊天超时 Lambda）。"
+else
+  TIMEOUTS_LAMBDA_ROLE_ARN="$(LAMBDA_ROLE_NAME="$TIMEOUTS_LAMBDA_ROLE_NAME" ensure_lambda_role)"
+  aws lambda create-function \
+    --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" \
+    --runtime "$TIMEOUTS_LAMBDA_RUNTIME" \
+    --handler "$TIMEOUTS_LAMBDA_HANDLER" \
+    --role "$TIMEOUTS_LAMBDA_ROLE_ARN" \
+    --timeout "$TIMEOUTS_LAMBDA_TIMEOUT" \
+    --environment "$TIMEOUTS_LAMBDA_ENV" \
+    --zip-file "fileb://$TIMEOUTS_LAMBDA_ZIP" \
+    --region "$TARGET_REGION" --output json >/dev/null || die "create-function 失败（聊天超时 Lambda）。"
+fi
+aws lambda wait function-updated \
+  --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" 2>/dev/null || true
+TIMEOUTS_LAMBDA_ARN="arn:aws:lambda:${TARGET_REGION}:${TARGET_ACCOUNT}:function:${TIMEOUTS_LAMBDA_FUNCTION_NAME}"
+ok "聊天超时 Lambda 就绪 -> $TIMEOUTS_LAMBDA_ARN"
+
+# Grant the function's execution role connect:UpdateParticipantRoleConfig on the instance's contacts.
+TIMEOUTS_ROLE_IN_USE="$(aws lambda get-function \
+  --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" \
+  --query 'Configuration.Role' --output text 2>/dev/null || true)"
+if [ -n "$TIMEOUTS_ROLE_IN_USE" ] && [ "$TIMEOUTS_ROLE_IN_USE" != "None" ]; then
+  TIMEOUTS_ROLE_IN_USE_NAME="${TIMEOUTS_ROLE_IN_USE##*/}"
+  TIMEOUTS_RUNTIME_POLICY="$(jq -n \
+    --arg contacts "arn:aws:connect:${TARGET_REGION}:${TARGET_ACCOUNT}:instance/${TARGET_INSTANCE_ID}/contact/*" '
+    {Version:"2012-10-17",Statement:[
+      {Effect:"Allow",Action:["connect:UpdateParticipantRoleConfig"],Resource:$contacts}
+    ]}')"
+  aws iam put-role-policy \
+    --role-name "$TIMEOUTS_ROLE_IN_USE_NAME" \
+    --policy-name "ConnectChatTimeouts-runtime-${TARGET_INSTANCE_ID}" \
+    --policy-document "$TIMEOUTS_RUNTIME_POLICY" >/dev/null 2>&1 \
+    && ok "已为聊天超时 Lambda 角色 '$TIMEOUTS_ROLE_IN_USE_NAME' 授予 connect:UpdateParticipantRoleConfig。" \
+    || warn "无法为聊天超时 Lambda 角色 '$TIMEOUTS_ROLE_IN_USE_NAME' 附加运行时策略（请检查 IAM 权限）。"
+else
+  warn "无法获取聊天超时 Lambda 执行角色，运行时权限未验证。"
+fi
+
+# Allow Amazon Connect to invoke the function, and associate it with the instance.
+aws lambda add-permission \
+  --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" \
+  --statement-id "AmazonConnect-${TARGET_INSTANCE_ID}" \
+  --action lambda:InvokeFunction \
+  --principal connect.amazonaws.com \
+  --source-arn "$TARGET_INSTANCE_ARN" \
+  --region "$TARGET_REGION" >/dev/null 2>&1 \
+  || log "聊天超时 Lambda 调用权限已存在（继续）。" >&2
+
+aws connect associate-lambda-function \
+  --instance-id "$TARGET_INSTANCE_ID" \
+  --function-arn "$TIMEOUTS_LAMBDA_ARN" \
+  --region "$TARGET_REGION" >/dev/null 2>&1 \
+  && ok "已将聊天超时 Lambda 关联到实例。" \
+  || log "聊天超时 Lambda 已关联到实例（继续）。" >&2
 
 # ============================================================================
 # 6. Import the contact flow (re-pointed at the target resources)
@@ -772,12 +957,15 @@ fi
 
 # Rewrite every target-specific literal in the flow (exact string matches).
 FLOW_CONTENT_FILE="$(mktemp)"
-trap 'rm -f "$FLOW_CONTENT_FILE"' EXIT
+trap 'rm -f "$FLOW_CONTENT_FILE" "$LAMBDA_ZIP" "$TIMEOUTS_LAMBDA_ZIP"' EXIT
 jq \
   --arg aOld "$FLOW_OLD_ASSISTANT_ARN"    --arg aNew "$TARGET_ASSISTANT_ARN" \
   --arg cOld "$FLOW_OLD_CHAT_AGENT_ARN"   --arg cNew "$NEW_CHAT_AGENT_ARN" \
   --arg vOld "$FLOW_OLD_VOICE_AGENT_ARN"  --arg vNew "$NEW_VOICE_AGENT_ARN" \
   --arg lOld "$FLOW_OLD_LAMBDA_ARN"       --arg lNew "$LAMBDA_ARN" \
+  --arg tlOld "$FLOW_OLD_TIMEOUTS_LAMBDA_ARN" --arg tlNew "$TIMEOUTS_LAMBDA_ARN" \
+  --arg lnOld "$FLOW_OLD_LAMBDA_NAME"     --arg lnNew "$LAMBDA_FUNCTION_NAME" \
+  --arg tlnOld "$FLOW_OLD_TIMEOUTS_LAMBDA_NAME" --arg tlnNew "$TIMEOUTS_LAMBDA_FUNCTION_NAME" \
   --arg xOld "$FLOW_OLD_LEX_ALIAS_ARN"    --arg xNew "$LEX_ALIAS_ARN" \
   --arg qOld "$FLOW_OLD_QUEUE_ARN"        --arg qNew "$TARGET_QUEUE_ARN" \
   --arg cnOld "$FLOW_OLD_CHAT_AGENT_NAME"  --arg cnNew "$CHAT_AGENT_NAME" \
@@ -786,12 +974,24 @@ jq \
   --arg fnOld "$FLOW_OLD_NAME"             --arg fnNew "$FLOW_NAME" \
   --arg phOld "$FLOW_OLD_PHONE"            --arg phNew "$FLOW_NEW_PHONE" \
   --arg buOld "$FLOW_OLD_BU"               --arg buNew "$FLOW_NEW_BU" \
+  --arg idleNew "$CUSTOMER_IDLE_TIMEOUT_MINUTES" \
+  --arg discNew "$CUSTOMER_AUTO_DISCONNECT_TIMEOUT_MINUTES" \
   'walk(
+     if type=="object" and (.Identifier? == "Set chat timeouts Lambda")
+        and (.Parameters?.LambdaInvocationAttributes?) then
+       .Parameters.LambdaInvocationAttributes.customerIdleTimeoutMinutes = $idleNew
+       | .Parameters.LambdaInvocationAttributes.customerAutoDisconnectTimeoutMinutes = $discNew
+     else . end
+   )
+   | walk(
      if type=="string" then
        if   . == $aOld  then $aNew
        elif . == $cOld  then $cNew
        elif . == $vOld  then $vNew
        elif . == $lOld  then $lNew
+       elif . == $tlOld then $tlNew
+       elif . == $lnOld then $lnNew
+       elif . == $tlnOld then $tlnNew
        elif . == $xOld  then $xNew
        elif . == $qOld  then $qNew
        elif . == $cnOld then $cnNew
@@ -837,7 +1037,7 @@ fi
 if [ "${RECONFIGURE_LEX_BOT:-true}" = "true" ]; then
   log "=== 重新配置 Lex 机器人的 Q in Connect intent -> $TARGET_ASSISTANT_ARN ==="
   INTENT_TMP="$(mktemp)"
-  trap 'rm -f "$FLOW_CONTENT_FILE" "$INTENT_TMP"' EXIT
+  trap 'rm -f "$FLOW_CONTENT_FILE" "$INTENT_TMP" "$LAMBDA_ZIP" "$TIMEOUTS_LAMBDA_ZIP"' EXIT
 
   LEX_RECONFIGURED=false
   LEX_LOCALES="$(aws lexv2-models list-bot-locales \
@@ -904,7 +1104,9 @@ printf '  %-38s %s\n' "$VOICE_AGENT_NAME"  "$VOICE_AGENT_ID"
 printf '  %-38s %s\n' "$CHAT_AGENT_NAME"   "$CHAT_AGENT_ID"
 printf '  %-38s %s\n' "$SECURITY_PROFILE_NAME" "$SECURITY_PROFILE_ID"
 printf '  %-38s %s\n' "$LAMBDA_FUNCTION_NAME" "$LAMBDA_ARN"
+printf '  %-38s %s\n' "$TIMEOUTS_LAMBDA_FUNCTION_NAME" "$TIMEOUTS_LAMBDA_ARN"
 printf '  %-38s %s\n' "$FLOW_NAME" "$FLOW_ID"
 echo
 ok "安全配置文件 '$SECURITY_PROFILE_NAME' 已关联到两个 AI agent。"
 ok "contact flow 已导入：CHAT->${CHAT_AGENT_NAME}，VOICE->${VOICE_AGENT_NAME}（版本 \$LATEST）。"
+ok "聊天超时已设置：客户空闲 ${CUSTOMER_IDLE_TIMEOUT_MINUTES} 分钟、客户自动断开 ${CUSTOMER_AUTO_DISCONNECT_TIMEOUT_MINUTES} 分钟（仅 CHAT 通道）。"

@@ -173,6 +173,22 @@
           "y": -1040
         }
       },
+      "Set chat timeouts Lambda": {
+        "position": {
+          "x": -1400,
+          "y": -640
+        },
+        "isFriendlyName": true,
+        "parameters": {
+          "LambdaFunctionARN": {
+            "displayName": "ConnectSetChatTimeouts"
+          }
+        },
+        "dynamicMetadata": {
+          "customerIdleTimeoutMinutes": false,
+          "customerAutoDisconnectTimeoutMinutes": false
+        }
+      },
       "Update session data Lambda-copy-1": {
         "position": {
           "x": -1120,
@@ -545,6 +561,31 @@
     },
     {
       "Parameters": {
+        "LambdaFunctionARN": "arn:aws:lambda:us-west-2:991727053196:function:ConnectSetChatTimeouts",
+        "InvocationTimeLimitSeconds": "8",
+        "InvocationType": "SYNCHRONOUS",
+        "LambdaInvocationAttributes": {
+          "customerIdleTimeoutMinutes": "5",
+          "customerAutoDisconnectTimeoutMinutes": "10"
+        },
+        "ResponseValidation": {
+          "ResponseType": "STRING_MAP"
+        }
+      },
+      "Identifier": "Set chat timeouts Lambda",
+      "Type": "InvokeLambdaFunction",
+      "Transitions": {
+        "NextAction": "Update session data Lambda-copy-1",
+        "Errors": [
+          {
+            "NextAction": "Update session data Lambda-copy-1",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
         "LambdaFunctionARN": "arn:aws:lambda:us-west-2:991727053196:function:ConnectAssistantUpdateSessionData",
         "InvocationTimeLimitSeconds": "8",
         "InvocationType": "SYNCHRONOUS",
@@ -711,7 +752,7 @@
             }
           },
           {
-            "NextAction": "Update session data Lambda-copy-1",
+            "NextAction": "Set chat timeouts Lambda",
             "Condition": {
               "Operator": "Equals",
               "Operands": [
