@@ -17,7 +17,7 @@
 | Security Profile | `AI-Agent` | 创建后关联到上述两个 AI Agent |
 | Lambda | `ConnectAssistantUpdateSessionData` | 从 `lambda/ConnectAssistantUpdateSessionData/` 现场打包部署、设置环境变量、授予运行时权限、关联到实例 |
 | Lambda | `ConnectSetChatTimeouts` | 设置 CHAT 通道的客户空闲超时（默认 5 分钟）与客户自动断开超时（默认 10 分钟），调用 `connect:UpdateParticipantRoleConfig` |
-| Contact Flow | `AI Agent - MCP Inbound Flow` | 从 JSON 模板导入，并重写为目标资源 |
+| Contact Flow | `AI Agent - MCP Inbound Flow` | 从 JSON 模板导入，并重写为目标资源；CHAT 分支内置「聊天超时检测 + 客户返回」的 Wait 循环 |
 
 执行流程（共 7 步）：
 
@@ -26,8 +26,21 @@
 3. **Security Profile**：创建 `AI-Agent`（已存在则复用）。
 4. **关联安全配置文件**：通过 SigV4 直接调用 `AssociateSecurityProfiles`，把 `AI-Agent` 绑定到两个 agent 的 `$SAVED` 版本。
 5. **部署 Lambda**：从 `lambda/ConnectAssistantUpdateSessionData/` 现场打包部署/更新 `ConnectAssistantUpdateSessionData`，设置 `AI_ASSISTANT_ID`、`CONNECT_INSTANCE_ID` 环境变量，授予 `connect:DescribeContact` + `UpdateSessionData`，并关联到实例。另外部署/更新 `ConnectSetChatTimeouts`（从 `lambda/ConnectSetChatTimeouts/` 现场打包），授予 `connect:UpdateParticipantRoleConfig`，并关联到实例，用于设置 CHAT 通道的聊天超时。
-6. **导入 Contact Flow**：把模板 JSON 中的 assistant / agent / Lambda / Lex 别名 / 队列等替换为目标值后导入（同名则更新）。CHAT 用 Chat agent、VOICE 用 Voice agent，版本均为 `$LATEST`。CHAT 分支起始处会先调用 `ConnectSetChatTimeouts` 设置聊天超时，超时分钟数按环境变量写入流程。
+6. **导入 Contact Flow**：把模板 JSON 中的 assistant / agent / Lambda / Lex 别名 / 队列等替换为目标值后导入（同名则更新）。CHAT 用 Chat agent、VOICE 用 Voice agent，版本均为 `$LATEST`。CHAT 分支起始处会先调用 `ConnectSetChatTimeouts` 设置聊天超时，超时分钟数按环境变量写入流程。CHAT 分支还内置一段「聊天超时检测 + 客户返回」的 Wait 循环（见下）。
 7. **重配 Lex 机器人**：把 Lex 机器人的 Amazon Q in Connect intent 指向目标 assistant，并重建 locale（`TestBotAlias` 始终指向 DRAFT 版本）。
+
+---
+
+## 一·补充、CHAT 聊天超时检测与客户返回（Wait 模块）
+
+CHAT 分支在与 Lex / AI Agent 交互的节点（`ConnectParticipantWithLexBot`）上配置了 `LexTimeoutSeconds`（默认 60 秒），并新增了一段超时—返回循环：
+
+1. **检测超时**：当客户在聊天中长时间无输入，触发 `InputTimeLimitExceeded`，流程进入「Are you still there?」提示消息（`MessageParticipant`）。
+2. **Wait 等待返回**：随后进入 **Wait 模块**，监听 `CustomerReturned` 事件，最长等待 30 秒：
+   - 客户在等待窗口内返回（`CustomerReturned`）→ 进入「Glad you're back」（`UpdateFlowAttributes` 设置欢迎语）并重新创建 Wisdom 会话，**回到 AI Agent 继续对话**；
+   - 等待超时仍未返回（`WaitCompleted`）→ 断开参与者（`DisconnectParticipant`）。
+
+> 说明：上面的「无输入 60 秒」和「Wait 等待 30 秒」是流程模板中的默认值，可在 `AI Agent - MCP Inbound Flow.json` 中按需调整（分别对应 CHAT 节点的 `LexTimeoutSeconds` 与 Wait 节点的 `TimeLimitSeconds`）。该 Wait 循环用于检测会话级别的客户离开/返回，与 `ConnectSetChatTimeouts` 设置的客户空闲/自动断开超时是互补关系。
 
 ---
 

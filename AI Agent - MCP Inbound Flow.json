@@ -326,6 +326,33 @@
           "x": 0,
           "y": -1040
         }
+      },
+      "815233e2-5b9b-45d9-8484-47cd0d5f293e": {
+        "position": {
+          "x": -280,
+          "y": -300
+        }
+      },
+      "f7fb43d3-559c-4c7e-8201-c8f111a7b14f": {
+        "position": {
+          "x": 0,
+          "y": -300
+        },
+        "parameters": {
+          "TimeLimitSeconds": {
+            "unit": 30
+          }
+        },
+        "timeoutUnit": {
+          "display": "Seconds",
+          "value": "second"
+        }
+      },
+      "e2d15dc4-4dcd-4873-a1ea-1630025c4b44": {
+        "position": {
+          "x": 280,
+          "y": -300
+        }
       }
     },
     "Annotations": [],
@@ -377,6 +404,9 @@
         "LexSessionAttributes": {
           "customerId": "lei",
           "x-amz-lex:q-in-connect:ai-agent-arn": "arn:aws:wisdom:us-west-2:991727053196:ai-agent/14fe4db3-cca0-4c91-b484-ee7dc6a0e9aa/f01b8be1-b98b-40b9-b942-3ffc62c14e57:$LATEST"
+        },
+        "LexTimeoutSeconds": {
+          "Text": "60"
         }
       },
       "Identifier": "e0652a4d-0861-41f7-80e6-083dd1a92b93",
@@ -384,6 +414,10 @@
       "Transitions": {
         "NextAction": "e191ff8d-982a-4436-b457-320ac5a62a85",
         "Errors": [
+          {
+            "NextAction": "815233e2-5b9b-45d9-8484-47cd0d5f293e",
+            "ErrorType": "InputTimeLimitExceeded"
+          },
           {
             "NextAction": "28a2957c-b622-4409-89b7-fbb71bcde3c3",
             "ErrorType": "NoMatchingCondition"
@@ -839,6 +873,82 @@
         "Errors": [
           {
             "NextAction": "2badefc0-ae32-4707-9080-59bdc0fd2ae3",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "SkipWhenDTMFBufferEnabled": "false",
+        "Text": "Are you still there?"
+      },
+      "Identifier": "815233e2-5b9b-45d9-8484-47cd0d5f293e",
+      "Type": "MessageParticipant",
+      "Transitions": {
+        "NextAction": "f7fb43d3-559c-4c7e-8201-c8f111a7b14f",
+        "Errors": [
+          {
+            "NextAction": "f7fb43d3-559c-4c7e-8201-c8f111a7b14f",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "TimeLimitSeconds": "30",
+        "Events": [
+          "CustomerReturned"
+        ]
+      },
+      "Identifier": "f7fb43d3-559c-4c7e-8201-c8f111a7b14f",
+      "Type": "Wait",
+      "Transitions": {
+        "NextAction": "2badefc0-ae32-4707-9080-59bdc0fd2ae3",
+        "Conditions": [
+          {
+            "NextAction": "e2d15dc4-4dcd-4873-a1ea-1630025c4b44",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "CustomerReturned"
+              ]
+            }
+          },
+          {
+            "NextAction": "2badefc0-ae32-4707-9080-59bdc0fd2ae3",
+            "Condition": {
+              "Operator": "Equals",
+              "Operands": [
+                "WaitCompleted"
+              ]
+            }
+          }
+        ],
+        "Errors": [
+          {
+            "NextAction": "2badefc0-ae32-4707-9080-59bdc0fd2ae3",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "FlowAttributes": {
+          "welcome_msg": {
+            "Value": "Glad you're back"
+          }
+        }
+      },
+      "Identifier": "e2d15dc4-4dcd-4873-a1ea-1630025c4b44",
+      "Type": "UpdateFlowAttributes",
+      "Transitions": {
+        "NextAction": "a29113f6-f622-421e-9f1d-dafdb67abfd7",
+        "Errors": [
+          {
+            "NextAction": "a29113f6-f622-421e-9f1d-dafdb67abfd7",
             "ErrorType": "NoMatchingError"
           }
         ]
