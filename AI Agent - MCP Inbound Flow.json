@@ -52,6 +52,11 @@
               "useLexBotDropdown": true,
               "lexV2BotName": "NovaSonicSupport_2025_Bot"
             }
+          },
+          "LexTimeoutSeconds": {
+            "Text": {
+              "unit": 60
+            }
           }
         },
         "dynamicMetadata": {
@@ -341,12 +346,12 @@
         },
         "parameters": {
           "TimeLimitSeconds": {
-            "unit": 30
+            "unit": 1
           }
         },
         "timeoutUnit": {
-          "display": "Seconds",
-          "value": "second"
+          "display": "Minutes",
+          "value": "minute"
         }
       },
       "e2d15dc4-4dcd-4873-a1ea-1630025c4b44": {
@@ -899,7 +904,7 @@
     },
     {
       "Parameters": {
-        "TimeLimitSeconds": "30",
+        "TimeLimitSeconds": "60",
         "Events": [
           "CustomerReturned"
         ]
