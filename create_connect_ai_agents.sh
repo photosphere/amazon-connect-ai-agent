@@ -211,7 +211,7 @@ init_manifest() {
     instanceId="$TARGET_INSTANCE_ID" \
     region="$TARGET_REGION" \
     suffix="${NAME_SUFFIX:-}"
-  ok "资源清单文件          : $RESOURCE_MANIFEST（clear.sh 用此文件删除资源）"
+  ok "资源清单文件          : ${RESOURCE_MANIFEST}（clear.sh 用此文件删除资源）"
 }
 
 # record <type> <key=value> ...  -> append a JSON line to the manifest.
