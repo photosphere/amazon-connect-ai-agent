@@ -113,6 +113,7 @@
         },
         "dynamicMetadata": {
           "customerId": false,
+          "x-amz-lex:audio:start-timeout-ms:*:*": false,
           "x-amz-lex:q-in-connect:ai-agent-arn": false
         },
         "useLexBotDropdown": true,
@@ -469,6 +470,7 @@
         },
         "LexSessionAttributes": {
           "customerId": "lei",
+          "x-amz-lex:audio:start-timeout-ms:*:*": "20000",
           "x-amz-lex:q-in-connect:ai-agent-arn": "arn:aws:wisdom:us-west-2:991727053196:ai-agent/14fe4db3-cca0-4c91-b484-ee7dc6a0e9aa/1ad99f3e-e69c-4477-b45e-36b8b56a0449:$LATEST"
         }
       },
