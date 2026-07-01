@@ -193,6 +193,46 @@ build_lex_alias_arn() {
 }
 
 # ----------------------------------------------------------------------------
+# Resource manifest
+# ----------------------------------------------------------------------------
+# Every resource this script CREATES is appended to a manifest file (one JSON
+# object per line) so that clear.sh can tear everything down later. Only newly
+# created resources are recorded; reused/pre-existing resources are left alone.
+# Override the manifest path via the RESOURCE_MANIFEST environment variable.
+RESOURCE_MANIFEST="${RESOURCE_MANIFEST:-}"
+
+init_manifest() {
+  [ -n "$RESOURCE_MANIFEST" ] || RESOURCE_MANIFEST="created-resources-$(date +%Y%m%d-%H%M%S).jsonl"
+  : > "$RESOURCE_MANIFEST" || die "无法写入资源清单文件：$RESOURCE_MANIFEST"
+  # Record the deployment context as the first line (informational).
+  record meta \
+    createdAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    instanceArn="$TARGET_INSTANCE_ARN" \
+    instanceId="$TARGET_INSTANCE_ID" \
+    region="$TARGET_REGION" \
+    suffix="${NAME_SUFFIX:-}"
+  ok "资源清单文件          : $RESOURCE_MANIFEST（clear.sh 用此文件删除资源）"
+}
+
+# record <type> <key=value> ...  -> append a JSON line to the manifest.
+# Safe no-op until init_manifest has set RESOURCE_MANIFEST.
+record() {
+  [ -n "$RESOURCE_MANIFEST" ] || return 0
+  local type="$1"; shift
+  local args=( --arg type "$type" )
+  local filter='{type:$type'
+  local kv key
+  for kv in "$@"; do
+    key="${kv%%=*}"
+    args+=( --arg "$key" "${kv#*=}" )
+    filter="${filter}, ${key}:\$${key}"
+  done
+  filter="${filter}}"
+  jq -nc "${args[@]}" "$filter" >> "$RESOURCE_MANIFEST" \
+    || warn "无法把 $type 记录到资源清单。"
+}
+
+# ----------------------------------------------------------------------------
 # Argument & dependency validation
 # ----------------------------------------------------------------------------
 command -v aws >/dev/null 2>&1 || die "未找到 aws CLI，请安装 AWS CLI v2。"
@@ -265,6 +305,9 @@ log "Contact flow 名称     : $FLOW_NAME"
 log "名称后缀(suffix)      : ${NAME_SUFFIX:-（无）}"
 log "参考 assistant        : $REF_ASSISTANT_ARN ($REF_REGION)"
 
+# Start the resource manifest now that instance/region/suffix are known.
+init_manifest
+
 # ----------------------------------------------------------------------------
 # Resolve (or create) the target Q in Connect assistant ("domain")
 # ----------------------------------------------------------------------------
@@ -334,6 +377,8 @@ create_qic_domain() {
   new_assistant_arn="$(echo "$assistant_json" | jq -r '.assistant.assistantArn')"
   new_assistant_id="$(echo "$assistant_json" | jq -r '.assistant.assistantId')"
   ok "已创建 assistant '$NEW_ASSISTANT_NAME' -> $new_assistant_id"
+  record ASSISTANT region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" \
+    assistantId="$new_assistant_id" assistantArn="$new_assistant_arn" name="$NEW_ASSISTANT_NAME"
 
   # 2. Associate the assistant with the Connect instance.
   aws connect create-integration-association \
@@ -358,6 +403,8 @@ create_qic_domain() {
     new_kb_arn="$(echo "$kb_json" | jq -r '.knowledgeBase.knowledgeBaseArn')"
     new_kb_id="$(echo "$kb_json" | jq -r '.knowledgeBase.knowledgeBaseId')"
     ok "已创建知识库 '$kb_name' -> $new_kb_id"
+    record KNOWLEDGE_BASE region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" \
+      knowledgeBaseId="$new_kb_id" knowledgeBaseArn="$new_kb_arn" name="$kb_name"
 
     aws qconnect create-assistant-association \
       --assistant-id "$new_assistant_id" \
@@ -470,7 +517,11 @@ create_prompt_from_reference() {
     --cli-input-json "$input" \
     --output json)" || die "create-ai-prompt 失败：$new_name"
 
-  echo "$out" | jq -r '.aiPrompt.aiPromptId'
+  local new_prompt_id
+  new_prompt_id="$(echo "$out" | jq -r '.aiPrompt.aiPromptId')"
+  record AI_PROMPT region="$TARGET_REGION" assistantArn="$TARGET_ASSISTANT_ARN" \
+    aiPromptId="$new_prompt_id" name="$new_name"
+  echo "$new_prompt_id"
 }
 
 # ----------------------------------------------------------------------------
@@ -586,7 +637,11 @@ create_agent_from_reference() {
     --cli-input-json "$input" \
     --output json)" || die "create-ai-agent 失败：$new_name"
 
-  echo "$out" | jq -r '.aiAgent.aiAgentId'
+  local new_agent_id
+  new_agent_id="$(echo "$out" | jq -r '.aiAgent.aiAgentId')"
+  record AI_AGENT region="$TARGET_REGION" assistantArn="$TARGET_ASSISTANT_ARN" \
+    aiAgentId="$new_agent_id" name="$new_name"
+  echo "$new_agent_id"
 }
 
 # ============================================================================
@@ -637,6 +692,8 @@ else
     --query 'SecurityProfileId' \
     --output text)" || die "create-security-profile 失败：$SECURITY_PROFILE_NAME"
   ok "已创建安全配置文件 '$SECURITY_PROFILE_NAME' -> $SECURITY_PROFILE_ID"
+  record SECURITY_PROFILE region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" \
+    securityProfileId="$SECURITY_PROFILE_ID" name="$SECURITY_PROFILE_NAME"
 fi
 
 # ============================================================================
@@ -710,6 +767,7 @@ ensure_lambda_role() {
   arn="$(aws iam create-role --role-name "$LAMBDA_ROLE_NAME" \
     --assume-role-policy-document "$trust" \
     --query 'Role.Arn' --output text)" || die "create-role 失败：$LAMBDA_ROLE_NAME"
+  record IAM_ROLE roleName="$LAMBDA_ROLE_NAME"
   aws iam attach-role-policy --role-name "$LAMBDA_ROLE_NAME" \
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole >/dev/null \
     || warn "无法附加 AWSLambdaBasicExecutionRole。"
@@ -751,6 +809,8 @@ else
     --environment "$LAMBDA_ENV" \
     --zip-file "fileb://$LAMBDA_ZIP" \
     --region "$TARGET_REGION" --output json >/dev/null || die "create-function 失败。"
+  record LAMBDA_FUNCTION region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" \
+    functionName="$LAMBDA_FUNCTION_NAME"
 fi
 aws lambda wait function-updated \
   --function-name "$LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" 2>/dev/null || true
@@ -777,7 +837,8 @@ if [ -n "$LAMBDA_ROLE_IN_USE" ] && [ "$LAMBDA_ROLE_IN_USE" != "None" ]; then
     --role-name "$LAMBDA_ROLE_IN_USE_NAME" \
     --policy-name "ConnectAssistant-runtime-${TARGET_INSTANCE_ID}" \
     --policy-document "$LAMBDA_RUNTIME_POLICY" >/dev/null 2>&1 \
-    && ok "已为 Lambda 角色 '$LAMBDA_ROLE_IN_USE_NAME' 授予 connect:DescribeContact + UpdateSessionData。" \
+    && { ok "已为 Lambda 角色 '$LAMBDA_ROLE_IN_USE_NAME' 授予 connect:DescribeContact + UpdateSessionData。"; \
+         record IAM_ROLE_POLICY roleName="$LAMBDA_ROLE_IN_USE_NAME" policyName="ConnectAssistant-runtime-${TARGET_INSTANCE_ID}"; } \
     || warn "无法为 Lambda 角色 '$LAMBDA_ROLE_IN_USE_NAME' 附加运行时策略（请检查 IAM 权限）。"
 else
   warn "无法获取 Lambda 执行角色，运行时权限未验证。"
@@ -843,6 +904,8 @@ else
     --environment "$TIMEOUTS_LAMBDA_ENV" \
     --zip-file "fileb://$TIMEOUTS_LAMBDA_ZIP" \
     --region "$TARGET_REGION" --output json >/dev/null || die "create-function 失败（聊天超时 Lambda）。"
+  record LAMBDA_FUNCTION region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" \
+    functionName="$TIMEOUTS_LAMBDA_FUNCTION_NAME"
 fi
 aws lambda wait function-updated \
   --function-name "$TIMEOUTS_LAMBDA_FUNCTION_NAME" --region "$TARGET_REGION" 2>/dev/null || true
@@ -864,7 +927,8 @@ if [ -n "$TIMEOUTS_ROLE_IN_USE" ] && [ "$TIMEOUTS_ROLE_IN_USE" != "None" ]; then
     --role-name "$TIMEOUTS_ROLE_IN_USE_NAME" \
     --policy-name "ConnectChatTimeouts-runtime-${TARGET_INSTANCE_ID}" \
     --policy-document "$TIMEOUTS_RUNTIME_POLICY" >/dev/null 2>&1 \
-    && ok "已为聊天超时 Lambda 角色 '$TIMEOUTS_ROLE_IN_USE_NAME' 授予 connect:UpdateParticipantRoleConfig。" \
+    && { ok "已为聊天超时 Lambda 角色 '$TIMEOUTS_ROLE_IN_USE_NAME' 授予 connect:UpdateParticipantRoleConfig。"; \
+         record IAM_ROLE_POLICY roleName="$TIMEOUTS_ROLE_IN_USE_NAME" policyName="ConnectChatTimeouts-runtime-${TARGET_INSTANCE_ID}"; } \
     || warn "无法为聊天超时 Lambda 角色 '$TIMEOUTS_ROLE_IN_USE_NAME' 附加运行时策略（请检查 IAM 权限）。"
 else
   warn "无法获取聊天超时 Lambda 执行角色，运行时权限未验证。"
@@ -898,7 +962,8 @@ aws connect associate-bot \
   --instance-id "$TARGET_INSTANCE_ID" \
   --lex-v2-bot "AliasArn=$LEX_ALIAS_ARN" \
   --region "$TARGET_REGION" >/dev/null 2>&1 \
-  && ok "已将 Lex 机器人（TestBotAlias）关联到实例。" \
+  && { ok "已将 Lex 机器人（TestBotAlias）关联到实例。"; \
+       record LEX_BOT_ASSOCIATION region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" aliasArn="$LEX_ALIAS_ARN"; } \
   || log "Lex 机器人已关联或跳过关联（继续）。" >&2
 
 # Resolve the target queue ARN (fall back to the first standard queue).
@@ -950,7 +1015,8 @@ else
         --role-name "$LEX_BOT_ROLE_NAME" \
         --policy-name "QInConnect-${ASSISTANT_ID}" \
         --policy-document "$LEX_GRANT_POLICY" >/dev/null 2>&1 \
-        && ok "已为 Lex 机器人角色 '$LEX_BOT_ROLE_NAME' 授予对 assistant $ASSISTANT_ID 的访问权限。" \
+        && { ok "已为 Lex 机器人角色 '$LEX_BOT_ROLE_NAME' 授予对 assistant $ASSISTANT_ID 的访问权限。"; \
+             record IAM_ROLE_POLICY roleName="$LEX_BOT_ROLE_NAME" policyName="QInConnect-${ASSISTANT_ID}"; } \
         || warn "无法为 Lex 机器人角色 '$LEX_BOT_ROLE_NAME' 附加访问策略（请检查 IAM 权限）。" ;;
   esac
 fi
@@ -1026,6 +1092,8 @@ else
     --region "$TARGET_REGION" \
     --query 'ContactFlowId' --output text)" || die "create-contact-flow 失败。"
   ok "已创建 contact flow -> $FLOW_ID"
+  record CONTACT_FLOW region="$TARGET_REGION" instanceId="$TARGET_INSTANCE_ID" \
+    contactFlowId="$FLOW_ID" name="$FLOW_NAME"
 fi
 
 # ============================================================================
@@ -1110,3 +1178,6 @@ echo
 ok "安全配置文件 '$SECURITY_PROFILE_NAME' 已关联到两个 AI agent。"
 ok "contact flow 已导入：CHAT->${CHAT_AGENT_NAME}，VOICE->${VOICE_AGENT_NAME}（版本 \$LATEST）。"
 ok "聊天超时已设置：客户空闲 ${CUSTOMER_IDLE_TIMEOUT_MINUTES} 分钟、客户自动断开 ${CUSTOMER_AUTO_DISCONNECT_TIMEOUT_MINUTES} 分钟（仅 CHAT 通道）。"
+echo
+ok "已创建资源清单：$RESOURCE_MANIFEST"
+ok "如需删除本次创建的所有资源，运行： ./clear.sh $RESOURCE_MANIFEST"

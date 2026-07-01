@@ -156,6 +156,36 @@ LEX_BOT_ARN=arn:aws:lex:us-west-2:111122223333:bot/ABCDEF1234 \
 | 文件 | 用途 |
 |------|------|
 | `create_connect_ai_agents.sh` | 主脚本 |
+| `clear.sh` | 清理脚本，按资源清单删除本次创建的所有资源 |
 | `AI Agent - MCP Inbound Flow.json` | 联系流程模板（导入时按目标资源重写） |
 | `lambda/ConnectAssistantUpdateSessionData/index.js` | 更新会话数据 Lambda 源码（部署时现场打包） |
 | `lambda/ConnectSetChatTimeouts/index.py` | 聊天超时 Lambda 源码（部署时现场打包） |
+
+---
+
+## 八、资源清单与清理（clear.sh）
+
+`create_connect_ai_agents.sh` 每次运行都会生成一个**资源清单文件**（默认 `created-resources-<时间戳>.jsonl`，可用环境变量 `RESOURCE_MANIFEST` 指定路径）。清单中仅记录本次**新创建**的资源（复用/已存在的资源不会记录，因此清理时不会误删），每行一个 JSON 对象，记录的资源类型包括：
+
+- `ASSISTANT` / `KNOWLEDGE_BASE`（仅当脚本新建了 Q in Connect domain / 知识库时）
+- `AI_PROMPT`、`AI_AGENT`
+- `SECURITY_PROFILE`
+- `LAMBDA_FUNCTION`（两个 Lambda）
+- `IAM_ROLE`（脚本创建的 Lambda 执行角色）、`IAM_ROLE_POLICY`（附加到既有角色上的内联策略）
+- `CONTACT_FLOW`
+- `LEX_BOT_ASSOCIATION`
+
+用 `clear.sh` 传入该清单文件即可按依赖顺序删除全部资源：
+
+```bash
+chmod +x clear.sh
+
+# 交互式确认后删除
+./clear.sh created-resources-20260702-101530.jsonl
+
+# 跳过确认（谨慎使用）
+./clear.sh -y created-resources-20260702-101530.jsonl
+```
+
+删除顺序：contact flow → AI agent → AI prompt → 安全配置文件 → Lambda（先从实例解除关联）→ Lex 机器人关联 → 内联策略 → IAM 角色 → 知识库 → assistant。每一步都是尽力而为（best-effort），个别资源因依赖未就绪删除失败时，可重新运行脚本重试。
+
